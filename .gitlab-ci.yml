@@ -1,0 +1,57 @@
+variables:
+  KUBE_CONTEXT: "$CI_PROJECT_PATH:nuxt-greenapi"
+
+.base:
+  # See https://gitlab.com/gitlab-org/cluster-integration/cluster-applications/
+  image: "registry.gitlab.com/gitlab-org/cluster-integration/cluster-applications:v2.3.0"
+  before_script:
+    - chmod 400 "$KUBECONFIG"   # Workaround for https://gitlab.com/gitlab-org/gitlab/-/issues/327912
+    - gl-use-kube-context
+
+stages:
+  - generate
+  - build
+  - deploy
+
+Generate Static files:
+  stage: generate
+  image: node:20.10.0
+  script:
+    - cd app
+    - echo "Start building App"
+    - npm install
+    - npm run build
+    - npm run generate
+    - cp -r ./.output/public/* ../nginx/public/
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - $CI_PROJECT_DIR/nginx/public
+  when: manual
+
+Build&Push App:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor --context "$CI_PROJECT_DIR/nginx"
+      --dockerfile "$CI_PROJECT_DIR/nginx/Dockerfile"
+      --destination "$CI_REGISTRY_IMAGE/greenapi:$CI_COMMIT_SHORT_SHA"
+      --destination "$CI_REGISTRY_IMAGE/greenapi:latest"
+      --cache=false
+
+  dependencies:
+    - Generate Static files
+  when: manual
+
+Deploy GreenAPI Test APP to k3s:
+  extends: .base
+  stage: deploy
+  script:
+    - gl-ensure-namespace greenapi
+    - kubectl apply -f $CI_PROJECT_DIR/greenapi.yaml
+  when: manual
+
